@@ -1,0 +1,105 @@
+
+import queue
+import threading
+import time
+
+NUCLEOS = [0, 1]
+
+# (nombre, segundos de CPU, segundos de E/S)
+PROCESOS = [
+    ("P1", 2, 4),
+    ("P2", 3, 2),
+    ("P3", 4, 1),
+]
+
+# Núcleo asignado a cada proceso cuando se usa afinidad
+AFINIDAD = {"P1": 1, "P2": 0, "P3": 1}
+
+TOLERANCIA = 0.1  
+
+def evento(t0, nombre, texto):
+    print(f"  t={time.perf_counter() - t0:5.2f} s  {nombre}: {texto}")
+
+def proceso(nombre, cpu, es, cola, t0, resultados):
+    llegada = time.perf_counter()
+    evento(t0, nombre, "LISTO (espera un núcleo)")
+
+    nucleo = cola.get()                 # bloquea hasta que haya un núcleo permitido libre
+    inicio_cpu = time.perf_counter()
+    evento(t0, nombre, f"EJECUTANDO en el núcleo {nucleo}")
+    time.sleep(cpu)                     # ráfaga de CPU simulada
+
+    cola.put(nucleo)                    # libera el núcleo
+    fin_cpu = time.perf_counter()
+    evento(t0, nombre, "BLOQUEADO (E/S)")
+    time.sleep(es)                      # ráfaga de E/S simulada
+    
+    fin = time.perf_counter()
+    evento(t0, nombre, "TERMINADO")
+    resultados[nombre] = {
+        "espera": inicio_cpu - llegada,
+        "cpu": fin_cpu - inicio_cpu,
+        "es": fin - fin_cpu,
+        "total": fin - llegada,
+    }
+
+def simular(con_afinidad):
+    if con_afinidad:
+        # Una cola por núcleo: cada proceso solo mira la de su núcleo
+        cola_nucleo = {n: queue.Queue() for n in NUCLEOS}
+        for n, c in cola_nucleo.items():
+            c.put(n)
+        cola_de = {nombre: cola_nucleo[AFINIDAD[nombre]] for nombre, _, _ in PROCESOS}
+    else:
+        # Una cola común: cualquier proceso toma cualquier núcleo libre
+        comun = queue.Queue()
+        for n in NUCLEOS:
+            comun.put(n)
+        cola_de = {nombre: comun for nombre, _, _ in PROCESOS}
+
+    resultados = {}
+    hilos = []
+    t0 = time.perf_counter()
+    for nombre, cpu, es in PROCESOS:
+        h = threading.Thread(
+            target=proceso, args=(nombre, cpu, es, cola_de[nombre], t0, resultados)
+        )
+        hilos.append(h)
+        h.start()
+        time.sleep(0.01)                # llegan casi juntos, en orden P1, P2, P3
+    for h in hilos:
+        h.join()
+    return time.perf_counter() - t0, resultados
+
+def mostrar(total, resultados):
+    print(f"\n  {'Proceso':<8}{'Espera':>8}{'CPU':>7}{'E/S':>7}{'Total':>8}")
+    for nombre, _, _ in PROCESOS:
+        r = resultados[nombre]
+        print(f"  {nombre:<8}{r['espera']:>7.2f}s{r['cpu']:>6.2f}s{r['es']:>6.2f}s{r['total']:>7.2f}s")
+    print(f"  Tiempo total de la simulación: {total:.2f} s\n")
+
+def main():
+    totales = {}
+    for con_afinidad in (True, False):
+        etiqueta = "CON afinidad" if con_afinidad else "SIN afinidad"
+        print(f"=== Simulación {etiqueta} (núcleos {NUCLEOS}) ===")
+        if con_afinidad:
+            print("  Afinidad: " + ", ".join(f"{p} -> núcleo {n}" for p, n in AFINIDAD.items()))
+        total, resultados = simular(con_afinidad)
+        mostrar(total, resultados)
+        totales[etiqueta] = total
+
+    con, sin = totales["CON afinidad"], totales["SIN afinidad"]
+    print("=== Comparación ===")
+    print(f"  CON afinidad: {con:.2f} s")
+    print(f"  SIN afinidad: {sin:.2f} s")
+    if abs(con - sin) < TOLERANCIA:
+        print("  Resultado: empate")
+    else:
+        ganador = "CON afinidad" if con < sin else "SIN afinidad"
+        diferencia = abs(con - sin) / max(con, sin) * 100
+        print(f"  Más rápido: {ganador} ({diferencia:.1f} % menos tiempo)")
+
+if __name__ == "__main__":
+    main()
+
